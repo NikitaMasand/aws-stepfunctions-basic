@@ -1,0 +1,126 @@
+service: awsstepfunction
+frameworkVersion: '2'
+
+provider:
+  name: aws
+  runtime: nodejs12.x
+  lambdaHashingVersion: 
+  region: us-east-1
+  profile: serverless-admin
+  iamRoleStatements:
+    - Effect: Allow
+      Action: dynamodb:*
+      # Resource: arn:aws:dynamodb:us-east-1:243096037789499095:table/bookTable
+    - Effect: Allow
+      Action: dynamodb:*
+      # Resource: arn:aws:dynamodb:us-east-1:943096037789499894:table/userTable
+
+
+plugins:
+  - serverless-step-functions
+
+functions:
+  checkInventory:
+    handler: handler.checkInventory
+  calculateTotal:
+    handler: handler.calculateTotal
+  redeemPoints:
+    handler: handler.redeemPoints
+  billCustomer:
+    handler: handler.billCustomer
+  restoreRedeemPoints:
+    handler: handler.restoreRedeemPoints
+  # sqsWorker:
+  #   handler: handler.sqsWorker
+  #   events:
+  #     - sqs:
+  #       arn: arn:aws:sqs:us-east-1:945096037789499234:OrdersQueue
+  #       batchSize: 1
+
+stepFunctions:
+  stateMachines:
+    storeCheckoutFlow:
+      name: storeCheckoutFlow
+      definition:
+        StartAt: checkInventory
+        States:
+          checkInventory:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [checkInventory, Arn]
+            Catch:
+              - ErrorEquals: [BookNotFound]
+                Next: BookNotFoundError
+              - ErrorEquals: [BookOutOfStock]
+                Next: BookOutOfStockError
+            ResultPath: "$.book"
+            Next: calculateTotal
+          calculateTotal:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [calculateTotal, Arn]
+            ResultPath: "$.total"
+            Next: isRedeemNeeded
+          isRedeemNeeded:
+            Type: Choice
+            Choices:
+              - Variable: "$.redeem"
+                BooleanEquals: true
+                Next: RedeemPoints
+            Default: BillCustomer
+          RedeemPoints:
+            Type: Task
+            Resource: 
+              Fn::GetAtt: [redeemPoints, Arn]
+            ResultPath: "$.total"
+            Catch:
+              - ErrorEquals: [States.ALL]
+                Next: RedeemPointsError
+            Next: BillCustomer
+          BillCustomer:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [billCustomer, Arn]
+            ResultPath: "$.billingStatus"
+            Retry:
+              - ErrorEquals: [States.ALL]
+                MaxAttempts: 3
+            Catch:
+              - ErrorEquals: [States.ALL]
+                ResultPath: "$.customerBilling"
+                Next: BillingError
+            End: true
+          BookNotFoundError:
+            Type: Pass
+            Result: "No such book available"
+            End: true
+          # PrepareOrder:
+          #   Type: Task
+          #   #attaching a task token to msg we send to sqs and wait for lambda to complete task and 
+          #   #send task token, then state machine knows to proceed to next state.
+
+          #   Resource: arn:aws:states:::sqs:sendMessage.waitforTaskToken
+          #   Parameters:
+          #     QueueUrl: https://sqs.us-east-1.amazonaws.com/498096037789499485/OrdersQueue
+          #     MessageBody:
+          #       Input.$: "$"
+          #       Token.$: "$$.Task/Token" #from the state machine context
+          BookOutOfStockError:
+            Type: Pass
+            Result: "Sorry, the book is out of stock"
+            End: true
+          RedeemPointsError:
+            Type: Pass
+            Result: "error in redeeming points"
+            End: true
+          BillingError:
+            Type: Pass
+            Result: "Billing error"
+            ResultPath: "$.billingStatus"
+            Next: RestoreRedeemPoints
+          RestoreRedeemPoints:
+            Type: Task
+            Resource:
+              Fn::GetAtt: [restoreRedeemPoints, Arn]
+            End: true
+
